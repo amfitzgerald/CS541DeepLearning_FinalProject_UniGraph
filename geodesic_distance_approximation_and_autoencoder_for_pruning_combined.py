@@ -5,7 +5,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import time
-import matplotlib.pyplot as plt
 
 # Set the device for computations: CUDA (GPU) if available, else CPU
 device = (
@@ -19,14 +18,14 @@ device = (
 # ----------------- Geodesic Distance Approximation Functions ---------------- #
 
 # Load data
-def get_data():
-    return torch.tensor(np.load("d61.npy")).float() # Convert to float tensor
+def get_data(n=10):
+    data = []
+    for i in range(n):
+        data.append(torch.tensor(np.load("d61.npy")).float()) # Convert to float tensor
+    return data
 
 # Main function to approximate geodesic distances
-def main(CONDENSE_FACTOR=0.5, NUM_NEIGHBORS=5):
-
-    # Load the point cloud data
-    data = get_data()
+def build_graph(data, CONDENSE_FACTOR=0.5, NUM_NEIGHBORS=5):
 
     # Cluster data to reduce the number of points
     # Number of clusters is proportional to "CONDENSE_FACTOR"
@@ -58,57 +57,7 @@ def main(CONDENSE_FACTOR=0.5, NUM_NEIGHBORS=5):
 
     return G.cpu().numpy() # Return geodesic distance matrix as a NumPy array
 
-# Function to run performance tests
-def test():
-    condense_factors = np.arange(0.1, 0.95, 0.05)
-    num_neighbors = range(2, 21)
-    num_points = range(1000, 10000, 1000)
 
-    condense_times = []
-    neighbor_times = []
-    point_times = []
-
-    for cf in condense_factors:
-        start_time = time.time()
-        main(CONDENSE_FACTOR=cf)
-        condense_times.append(1000 * (time.time() - start_time))
-
-    for nn in num_neighbors:
-        start_time = time.time()
-        main(NUM_NEIGHBORS=nn)
-        neighbor_times.append(1000 * (time.time() - start_time))
-
-    for n in num_points:
-        start_time = time.time()
-        main(NUM_POINTS=n)
-        point_times.append((time.time() - start_time))
-
-    plt.figure(figsize=(12, 6))
-
-    plt.subplot(1, 3, 1)
-    plt.plot(condense_factors, condense_times, marker='o')
-    plt.title("Computation Time vs Condense Factor")
-    plt.xlabel("Condense Factor")
-    plt.ylabel("Time (ms)")
-    plt.grid()
-
-    plt.subplot(1, 3, 2)
-    plt.plot(num_neighbors, neighbor_times, marker='o')
-    plt.title("Computation Time vs Num Neighbors")
-    plt.xlabel("Num Neighbors")
-    plt.ylabel("Time (ms)")
-    plt.grid()
-
-    plt.subplot(1, 3, 3)
-    plt.plot(num_points, point_times, marker='o')
-    plt.title("Computation Time vs Num Points")
-    plt.xlabel("Num Points")
-    plt.ylabel("Time (sec)")
-    plt.grid()
-
-    # Show plots
-    plt.tight_layout()
-    plt.show()
 
 # ----------------- Functions to Prune Adjacency Matrix with Autoencoder ---------------- #
 
@@ -199,23 +148,29 @@ if __name__ == '__main__':
     # Initilize runtime "stopwatch"
     start_time = time.time()
 
-    # Generate the adjacency matrix using the first script
-    print("Generating adjacency matrix...")
-    adjacency_matrix = main(CONDENSE_FACTOR=0.5, NUM_NEIGHBORS=5)
-    adjacency_matrix_tensor = torch.tensor(adjacency_matrix, device=device)
+    print("Getting data...")
+    adjacency_matrices = []
 
-    # Ensure symmetry of adjacency matrix
-    adjacency_matrix_tensor = (adjacency_matrix_tensor + adjacency_matrix_tensor.T) / 2
+    # Generate adjacency matrices for all datasets
+    for data in get_data():
+        g = build_graph(data, CONDENSE_FACTOR=0.5, NUM_NEIGHBORS=5)
+        adjacency_matrices.append(torch.tensor(g, device=device))
+
+    # Combine all adjacency matrices
+    all_data = torch.stack(adjacency_matrices).mean(dim=0)
+
+    # Ensure symmetry of the combined adjacency matrix
+    all_data = (all_data + all_data.T) / 2
 
     # Define the autoencoder and hyperparameters
-    input_dim = adjacency_matrix_tensor.shape[0]
+    input_dim = all_data.shape[0]
     latent_dim = 16
     model = Autoencoder(input_dim, latent_dim).to(device)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     # Prepare data for autoencoder
-    dataset = TensorDataset(adjacency_matrix_tensor)
+    dataset = TensorDataset(all_data)
     dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
 
     # Train the autoencoder
@@ -224,7 +179,8 @@ if __name__ == '__main__':
 
     # Prune the adjacency matrix
     print("Pruning the adjacency matrix...")
-    pruned_adjacency_matrix = prune_adjacency_matrix(model, adjacency_matrix_tensor)
+    # Get first data from loader
+    pruned_adjacency_matrix = prune_adjacency_matrix(model, next(iter(dataloader))[0])
 
     # Save the pruned adjacency matrix
     pruned_adjacency_matrix_np = pruned_adjacency_matrix.cpu().numpy()
